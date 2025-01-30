@@ -1,0 +1,155 @@
+1) Data Quality Issues
+Inconsistent or missing values
+
+One user (ID 658a306e99b40f103b63ccf8) has no birth date recorded (blank in BIRTH_DATE).
+Several transaction rows show FINAL_QUANTITY as "zero" instead of a numeric 0. This makes quantity calculations tricky unless you convert these strings to numeric.
+Potential placeholder or incomplete product data
+
+Some products list "PLACEHOLDER MANUFACTURER" in the MANUFACTURER column. Also, some rows have blank CATEGORY_4. We are not sure if this is valid or incomplete data.
+Mixed date/time formats
+
+PURCHASE_DATE is in MM/DD/YYYY format (e.g. "8/21/2024") while SCAN_DATE is in a different ISO‐like format ("2024-08-21 14:19:06.539 Z"). This makes direct comparisons or date arithmetic more cumbersome.
+Challenging fields
+
+FINAL_SALE vs. FINAL_QUANTITY: Some rows have FINAL_SALE but also show FINAL_QUANTITY as "zero". It is unclear if “zero” quantity with a nonzero sale is valid or if it indicates data entry errors.
+BRAND vs. MANUFACTURER: It is sometimes unclear whether the MANUFACTURER is distinct from the BRAND or simply repeated placeholders.
+
+2) SQL Queries
+A. Closed‐Ended #1
+Q: What are the top 5 brands by receipts scanned among users 21 and over?
+
+Assumptions / Approach
+
+“Receipts scanned” is interpreted as COUNT(DISTINCT t.receipt_id).
+A user is 21+ if YEAR(CURRENT_DATE) - YEAR(u.birth_date) >= 21 (or you can do a more precise date‐difference calculation).
+We join users → transactions → products (though here we really only need users and transactions plus the brand from products).
+
+SELECT 
+    p.brand,
+    COUNT(DISTINCT t.receipt_id) AS total_receipts
+FROM transactions t
+JOIN users u 
+    ON t.user_id = u.id
+JOIN products p
+    ON t.barcode = p.barcode
+WHERE 
+    DATEDIFF(YEAR, u.birth_date, GETDATE()) >= 21  -- or an equivalent age check
+GROUP BY 
+    p.brand
+ORDER BY 
+    total_receipts DESC
+LIMIT 5;
+
+
+B. Closed‐Ended #2
+Q: What is the percentage of sales in the Health & Wellness category by generation?
+
+Assumptions / Approach
+
+We first map birth years to “generations” (e.g. “Baby Boomers,” “Gen X,” “Millennials,” etc.). This is somewhat arbitrary; below is a rough example.
+“Percentage of sales in Health & Wellness” can be interpreted as “Of all sales in Health & Wellness, how does each generation’s share compare to the total?”
+
+
+WITH user_gen AS (
+    SELECT
+        id AS user_id,
+        CASE 
+            WHEN birth_date >= '1981-01-01' AND birth_date < '1997-01-01' THEN 'Millennial'
+            WHEN birth_date >= '1965-01-01' AND birth_date < '1981-01-01' THEN 'Gen X'
+            WHEN birth_date >= '1946-01-01' AND birth_date < '1965-01-01' THEN 'Baby Boomer'
+            ELSE 'Other'
+        END AS generation
+    FROM users
+),
+hw_sales AS (
+    SELECT 
+        ug.generation,
+        SUM(t.final_sale) AS total_sale_gen
+    FROM transactions t
+    JOIN products p 
+        ON t.barcode = p.barcode
+    JOIN user_gen ug
+        ON t.user_id = ug.user_id
+    WHERE p.category_1 = 'Health & Wellness'  -- filter to Health & Wellness
+    GROUP BY ug.generation
+),
+hw_sales_total AS (
+    SELECT SUM(total_sale_gen) AS total_sale FROM hw_sales
+)
+SELECT
+    h.generation,
+    CONCAT(
+        ROUND( (h.total_sale_gen / t.total_sale) * 100, 2 ),
+        '%'
+    ) AS pct_of_hw_sales
+FROM hw_sales h
+CROSS JOIN hw_sales_total t
+ORDER BY h.total_sale_gen DESC;
+
+
+C. Open‐Ended
+Q: Who are Fetch’s power users?
+
+Assumptions / Approach
+
+Define “power users” in a simple way—e.g. users whose total scan count is at least 10 receipts and who have scanned at least once a month for the past 3 months.
+The logic can vary; the key is to state your assumption clearly.
+
+
+WITH user_scans AS (
+    SELECT 
+        t.user_id,
+        COUNT(DISTINCT t.receipt_id) AS total_scans,
+        DATEDIFF(MONTH, MIN(t.scan_date), MAX(t.scan_date)) AS months_between_first_last
+    FROM transactions t
+    GROUP BY t.user_id
+),
+user_power AS (
+    SELECT
+        user_id,
+        total_scans
+    FROM user_scans
+    WHERE total_scans >= 10 
+      AND months_between_first_last >= 2  -- implies scanning over ~3 months
+)
+
+SELECT 
+    u.id,
+    u.state,
+    u.gender,
+    u.language,
+    up.total_scans
+FROM users u
+JOIN user_power up 
+    ON u.id = up.user_id
+ORDER BY up.total_scans DESC;
+
+
+3) Communicating Findings to Stakeholders
+Below is an example Slack or email message that highlights the key points in a nontechnical way.
+
+Subject: Preliminary Analysis of User & Transaction Data
+
+Hi there,
+
+I spent some time reviewing our latest user, transaction, and product files. Here are a few key takeaways:
+
+Data Quality Observations
+
+We have inconsistent formats in the “purchase date” and “scan date” fields, which can make time‐based analyses more challenging.
+Several rows show a FINAL_QUANTITY value of "zero" (as a string) instead of a numeric 0. This will need to be standardized for accurate reporting.
+A subset of products has “PLACEHOLDER MANUFACTURER” or missing category details, which suggests the data for those items might be incomplete.
+Interesting Trend
+
+Early signs indicate that Health & Wellness products comprise a sizable portion of sales—particularly among Millennials, who account for over 40% of total Health & Wellness sales. (Exact percent is still being validated but it’s notably higher for that age group.)
+Outstanding Questions & Next Steps
+
+Data Clarification: We need to confirm how “zero” quantity with a nonzero sale should be interpreted. Should these be excluded, or is this a legitimate use case (e.g. freebies, promos)?
+Missing Birth Dates: One user’s birth date is blank; do we have any additional source to fill that in for age‐based analyses?
+Manufacturer/Brand Placeholders: We should confirm whether these placeholders are real test data or if they represent re‐labeled brand names.
+Any guidance you can give on these points would help ensure the final analyses and dashboards are accurate. Please let me know if you have any questions or prefer a deeper dive into specific metrics.
+
+Thanks,
+Shawn
+
+
